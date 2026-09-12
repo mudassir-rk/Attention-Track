@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Focus-Aware Video Player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1115;
+    color: #e8e8e8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px;
+    margin: 0;
+  }
+  h1 { font-weight: 600; font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: #9aa0a6; margin-bottom: 20px; font-size: 0.9rem; }
+
+  .video-wrap { position: relative; width: 720px; max-width: 92vw; }
+  video { width: 100%; border-radius: 10px; background: #000; display: block; }
+
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.75);
+    border-radius: 10px;
+    text-align: center;
+    padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { margin: 0 0 8px 0; font-size: 1.2rem; }
+  .overlay p { color: #cfd3d8; margin: 0; font-size: 0.9rem; }
+
+  .status-bar {
+    width: 720px; max-width: 92vw;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 14px; padding: 10px 16px;
+    border-radius: 8px; background: #1a1d23;
+    font-size: 0.9rem;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+  .dot.focused { background: #34d399; }
+  .dot.distracted { background: #f87171; }
+  .dot.unknown { background: #6b7280; }
+
+  #report {
+    width: 720px; max-width: 92vw; margin-top: 24px;
+    background: #1a1d23; border-radius: 10px; padding: 20px;
+    display: none;
+  }
+  #report.visible { display: block; }
+  .score-big { font-size: 2.2rem; font-weight: 700; color: #34d399; }
+</style>
+</head>
+<body>
+
+<h1>Focus-Aware Video Player</h1>
+<p class="subtitle">The video pauses automatically when distraction is detected.</p>
+
+<div class="video-wrap">
+  <video id="lecture" controls>
+    <source src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" type="video/mp4">
+    Your browser does not support the video tag.
+  </video>
+
+  <div class="overlay" id="overlay">
+    <div>
+      <h2 id="overlayTitle">Connecting to detector…</h2>
+      <p id="overlaySubtitle">Starting webcam and calibration.</p>
+    </div>
+  </div>
+</div>
+
+<div class="status-bar">
+  <div><span class="dot unknown" id="statusDot"></span><span id="statusText">Waiting…</span></div>
+  <div>Focus score: <strong id="focusScoreText">--%</strong></div>
+</div>
+
+<div id="report">
+  <h2>Session Report</h2>
+  <p>Final focus score: <span class="score-big" id="finalScore">--%</span></p>
+  <canvas id="timelineChart" height="120"></canvas>
+</div>
+
+<script>
+const socket = io();
+const video = document.getElementById("lecture");
+const overlay = document.getElementById("overlay");
+const overlayTitle = document.getElementById("overlayTitle");
+const overlaySubtitle = document.getElementById("overlaySubtitle");
+const statusDot = document.getElementById("statusDot");
+const statusText = document.getElementById("statusText");
+const focusScoreText = document.getElementById("focusScoreText");
+
+let calibrationDone = false;
+
+socket.on("calibration_step", (data) => {
+  const labels = {
+    straight: ["Look straight at the screen", "Hold still, this sets your baseline."],
+    away: ["Now turn your head away", "Either direction — this teaches the system what 'distracted' looks like for you."],
+    closed: ["Now gently close your eyes", "This calibrates drowsiness detection."]
+  };
+  const [title, subtitle] = labels[data.step] || ["Calibrating…", ""];
+  overlayTitle.textContent = title;
+  overlaySubtitle.textContent = subtitle;
+});
+
+socket.on("status_change", (data) => {
+  if (!calibrationDone) {
+    calibrationDone = true;
+    overlay.classList.add("hidden");
+  }
+
+  if (data.status === "distracted") {
+    video.pause();
+    overlay.classList.remove("hidden");
+    overlayTitle.textContent = "Hey! Keep your eyes on the lesson.";
+    overlaySubtitle.textContent = "Reason: " + data.reason;
+    statusDot.className = "dot distracted";
+    statusText.textContent = "Distracted (" + data.reason + ")";
+  } else {
+    overlay.classList.add("hidden");
+    if (video.currentTime > 0) {
+      video.play().catch(() => {});
+    }
+    statusDot.className = "dot focused";
+    statusText.textContent = "Focused";
+  }
+});
+
+socket.on("focus_update", (data) => {
+  focusScoreText.textContent = data.focus_score + "%";
+});
+
+socket.on("error", (data) => {
+  overlayTitle.textContent = "Error";
+  overlaySubtitle.textContent = data.message;
+});
+
+video.addEventListener("ended", () => {
+  socket.emit("request_report");
+});
+
+socket.on("session_report", (data) => {
+  document.getElementById("report").classList.add("visible");
+  document.getElementById("finalScore").textContent = data.final_score + "%";
+
+  const labels = data.log.map(entry => entry[0].toFixed(0) + "s");
+  const values = data.log.map(entry => entry[1] ? 1 : 0);
+
+  new Chart(document.getElementById("timelineChart"), {
+    type: "line",
+    data: {
+      labels: labels,
+      datasets: [{
+        label: "Focused (1) / Distracted (0)",
+        data: values,
+        borderColor: "#34d399",
+        stepped: true,
+        pointRadius: 0,
+        fill: false
+      }]
+    },
+    options: {
+      scales: {
+        y: { min: -0.1, max: 1.1, ticks: { stepSize: 1 } },
+        x: { ticks: { maxTicksLimit: 10 } }
+      }
+    }
+  });
+});
+</script>
+
+</body>
+</html>
