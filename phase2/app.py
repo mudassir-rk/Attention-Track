@@ -1,4 +1,3 @@
-
 import time
 import threading
 import collections
@@ -9,9 +8,9 @@ import numpy as np
 from flask import Flask, render_template
 from flask_socketio import SocketIO
 
-EAR_CONSEC_FRAMES = 15
-YAW_CONSEC_FRAMES = 20
-NO_FACE_CONSEC_FRAMES = 20
+EAR_SECONDS_THRESHOLD = 2.0    
+YAW_SECONDS_THRESHOLD = 3.0     
+NO_FACE_SECONDS_THRESHOLD = 3.0 
 CALIBRATION_SECONDS = 4
 DEBOUNCE_WINDOW = 30
 
@@ -30,11 +29,10 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 state_lock = threading.Lock()
 shared_state = {
-    "status": "starting",
-    "focused" | "distracted"
+    "status": "starting",       
     "reason": "",
     "focus_score": 100.0,
-    "session_log": [],           
+    "session_log": [],          
 }
 session_start_time = None
 detection_thread_started = False
@@ -67,7 +65,8 @@ def yaw_offset(landmarks, w, h):
 
 
 def collect_samples(cap, face_mesh, seconds):
-
+    """Silent version of Phase 1's calibration sampler (no cv2.imshow,
+    since this runs headless inside the Flask background thread)."""
     ears, yaws = [], []
     start = time.time()
     while time.time() - start < seconds:
@@ -108,6 +107,9 @@ def run_calibration(cap, face_mesh):
 
 
 def detection_loop():
+    """Runs forever in a background thread. Reads webcam, runs face mesh,
+    and emits a WebSocket event ONLY when the focus status changes
+    (not every frame) — that's what the browser reacts to."""
     global session_start_time
 
     cap = cv2.VideoCapture(0)
@@ -132,9 +134,9 @@ def detection_loop():
             shared_state["session_log"] = []
         socketio.emit("status_change", {"status": "focused", "reason": ""})
 
-        eye_closed_counter = 0
-        yaw_away_counter = 0
-        no_face_counter = 0
+        eye_closed_since = None 
+        yaw_away_since = None    
+        no_face_since = None      
         focus_history = collections.deque(maxlen=DEBOUNCE_WINDOW)
         last_status = "focused"
 
@@ -146,18 +148,20 @@ def detection_loop():
             h, w = frame.shape[:2]
             results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+            now = time.time()
             is_focused = True
             reason = ""
 
             if not results.multi_face_landmarks:
-                no_face_counter += 1
-                eye_closed_counter = 0
-                yaw_away_counter = 0
-                if no_face_counter >= NO_FACE_CONSEC_FRAMES:
+                if no_face_since is None:
+                    no_face_since = now
+                eye_closed_since = None
+                yaw_away_since = None
+                if now - no_face_since >= NO_FACE_SECONDS_THRESHOLD:
                     is_focused = False
                     reason = "face not visible"
             else:
-                no_face_counter = 0
+                no_face_since = None
                 lm = results.multi_face_landmarks[0].landmark
 
                 left_ear = eye_aspect_ratio(lm, LEFT_EYE, w, h)
@@ -165,36 +169,42 @@ def detection_loop():
                 avg_ear = (left_ear + right_ear) / 2.0
                 yaw = yaw_offset(lm, w, h)
 
-                eye_closed_counter = eye_closed_counter + 1 if avg_ear < ear_threshold else 0
-                yaw_away_counter = yaw_away_counter + 1 if abs(yaw) > yaw_threshold else 0
+                if avg_ear < ear_threshold:
+                    if eye_closed_since is None:
+                        eye_closed_since = now
+                else:
+                    eye_closed_since = None
 
-                if eye_closed_counter >= EAR_CONSEC_FRAMES:
+                if abs(yaw) > yaw_threshold:
+                    if yaw_away_since is None:
+                        yaw_away_since = now
+                else:
+                    yaw_away_since = None
+
+                if eye_closed_since is not None and now - eye_closed_since >= EAR_SECONDS_THRESHOLD:
                     is_focused = False
                     reason = "eyes closed / looking down"
-                elif yaw_away_counter >= YAW_CONSEC_FRAMES:
+                elif yaw_away_since is not None and now - yaw_away_since >= YAW_SECONDS_THRESHOLD:
                     is_focused = False
                     reason = "looking away"
 
             focus_history.append(1 if is_focused else 0)
             focus_score = 100.0 * sum(focus_history) / len(focus_history)
             current_status = "focused" if is_focused else "distracted"
-            elapsed = time.time() - session_start_time
+            elapsed = now - session_start_time
 
             with state_lock:
                 shared_state["status"] = current_status
                 shared_state["reason"] = reason
                 shared_state["focus_score"] = focus_score
                 shared_state["session_log"].append((round(elapsed, 1), is_focused))
-
             if current_status != last_status:
                 socketio.emit("status_change", {"status": current_status, "reason": reason})
                 last_status = current_status
 
             socketio.emit("focus_update", {"focus_score": round(focus_score, 1)})
 
-            socketio.sleep(0.05)  
-
-
+            socketio.sleep(0.05) 
 @app.route("/")
 def index():
     return render_template("index.html")
