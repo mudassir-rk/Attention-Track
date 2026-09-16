@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+sessions.db
+phase2/static/videos/
+requirements.txt
