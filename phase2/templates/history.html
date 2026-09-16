@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Past Sessions — Focus-Aware Video Player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1115;
+    color: #e8e8e8;
+    padding: 30px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-weight: 600; font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: #9aa0a6; margin-bottom: 20px; font-size: 0.9rem; }
+
+  .back-link {
+    display: inline-block;
+    margin-bottom: 16px;
+    color: #34d399;
+    text-decoration: none;
+    font-size: 0.9rem;
+  }
+  .back-link:hover { text-decoration: underline; }
+
+  table {
+    width: 720px;
+    max-width: 92vw;
+    border-collapse: collapse;
+    background: #1a1d23;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    font-size: 0.9rem;
+    border-bottom: 1px solid #262a33;
+  }
+  th {
+    color: #9aa0a6;
+    font-weight: 600;
+    background: #16191f;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+  }
+  tr:last-child td { border-bottom: none; }
+
+  .score { font-weight: 700; }
+  .score.good { color: #34d399; }
+  .score.bad { color: #f87171; }
+
+  .btn {
+    background: #2b2f38;
+    color: #e8e8e8;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .btn:hover { background: #3a3f4a; }
+
+  .timeline-row td { padding: 0; }
+  .timeline-wrap { display: none; padding: 16px; }
+  .timeline-wrap.visible { display: block; }
+  canvas { width: 100% !important; }
+
+  .empty {
+    width: 720px;
+    max-width: 92vw;
+    background: #1a1d23;
+    border-radius: 10px;
+    padding: 40px 20px;
+    text-align: center;
+    color: #9aa0a6;
+  }
+</style>
+</head>
+<body>
+
+<a class="back-link" href="/">&larr; Back to video player</a>
+<h1>Past Sessions</h1>
+<p class="subtitle">Every completed video session, saved locally in sessions.db.</p>
+
+{% if sessions %}
+<table id="sessionTable">
+  <thead>
+    <tr>
+      <th>Date &amp; Time</th>
+      <th>Duration</th>
+      <th>Final Score</th>
+      <th>Timeline</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in sessions %}
+    <tr data-session-id="{{ s.id }}">
+      <td class="start-time">{{ s.start_time.replace("T", " ")[:19] }}</td>
+      <td class="duration"></td>
+      <td><span class="score {% if s.final_score >= 70 %}good{% else %}bad{% endif %}">{{ "%.1f"|format(s.final_score) }}%</span></td>
+      <td><button class="btn show-timeline">Show Timeline</button></td>
+    </tr>
+    <tr class="timeline-row" data-session-id="{{ s.id }}">
+      <td colspan="4"><div class="timeline-wrap"><canvas class="timeline-chart"></canvas></div></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <p>No sessions recorded yet.</p>
+  <p style="font-size:0.85rem;">Watch a video all the way to the end on the main page to save your first session.</p>
+</div>
+{% endif %}
+
+<script>
+function fmtDuration(seconds) {
+  const s = Math.round(seconds);
+  const mm = Math.floor(s / 60).toString().padStart(2, "0");
+  const ss = (s % 60).toString().padStart(2, "0");
+  return mm + ":" + ss;
+}
+
+function fmtDateTime(isoStr) {
+  const d = new Date(isoStr.replace(" ", "T"));
+  if (isNaN(d.getTime())) return isoStr;
+  return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+// Fill in human-readable duration + date columns (already has ISO text)
+document.querySelectorAll("#sessionTable tr[data-session-id]").forEach(row => {
+  if (row.getElementsByClassName("show-timeline").length === 0) return;
+  const id = row.dataset.sessionId;
+  const startCell = row.querySelector(".start-time");
+  const durationCell = row.querySelector(".duration");
+  startCell.textContent = fmtDateTime(startCell.textContent.trim());
+
+  fetch("/api/session/" + id).then(r => r.json()).then(data => {
+    durationCell.textContent = fmtDuration(data.duration);
+  });
+});
+
+document.querySelectorAll(".show-timeline").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const id = btn.closest("tr").dataset.sessionId;
+    const wrap = document.querySelector(".timeline-row[data-session-id='" + id + "'] .timeline-wrap");
+    const canvas = wrap.querySelector(".timeline-chart");
+
+    if (wrap.classList.contains("visible")) {
+      wrap.classList.remove("visible");
+      btn.textContent = "Show Timeline";
+      return;
+    }
+
+    fetch("/api/session/" + id).then(r => r.json()).then(data => {
+      const labels = data.log.map(entry => entry[0].toFixed(0) + "s");
+      const values = data.log.map(entry => entry[1] ? 1 : 0);
+      new Chart(canvas, {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [{
+            label: "Focused (1) / Distracted (0)",
+            data: values,
+            borderColor: "#34d399",
+            stepped: true,
+            pointRadius: 0,
+            fill: false
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            y: { min: -0.1, max: 1.1, ticks: { stepSize: 1 } },
+            x: { ticks: { maxTicksLimit: 10 } }
+          }
+        }
+      });
+      wrap.classList.add("visible");
+      btn.textContent = "Hide Timeline";
+    });
+  });
+});
+</script>
+
+</body>
+</html>
